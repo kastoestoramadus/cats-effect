@@ -198,7 +198,9 @@ def consume(source: TickSource): IO[Unit] =
   }
 ```
 
-Closing the resource scope unsubscribes from the source and cancels any in-flight handling. Effects submitted to a parallel `Dispatcher` run concurrently, so ticks may be handled out of order; use `Dispatcher.sequential` instead if handling must follow arrival order, at the cost that a slow handler delays the ticks behind it. See the [Dispatcher](std/dispatcher.md) and [Queue](std/queue.md) pages for more details.
+Closing the resource scope unsubscribes from the source, cancels any submission still in flight, and drops whatever is left in the queue. A callback that races with that unsubscribe can still reach a `Dispatcher` that has already shut down, and the `unsafeRunAndForget` it calls then throws `IllegalStateException` on the calling thread — the thread of the library invoking the callback. A source that cannot rule out such a race should catch that exception in its callback.
+
+Only the `queue.offer` of each tick goes through the `Dispatcher`; the ticks themselves are handled by the single consumer fiber, in the order they leave the queue. A parallel `Dispatcher` does not guarantee the order in which submitted effects run, so the offers, and therefore the handling, may follow a different order than the callbacks arrived in. If arrival order matters, use `Dispatcher.sequential`, which runs submitted effects strictly in submission order; here the submitted effect is a non-blocking offer, so that choice costs nothing. See the [Dispatcher](std/dispatcher.md) and [Queue](std/queue.md) pages for more details.
 
 ## Guarantee exclusive access to a resource
 
@@ -238,7 +240,7 @@ def submitAll(printer: SharedPrinter, jobs: List[PrintJob]): IO[Unit] =
   jobs.parTraverse_(printer.print)
 ```
 
-For the two jobs `PrintJob(1, 10)` and `PrintJob(2, 5)` the output is fully serialized. Which job runs first depends on whoever acquires the lock first, but the jobs never overlap:
+For the two jobs `PrintJob(1, 10)` and `PrintJob(2, 5)` the output is fully serialized. Which job runs first depends on whoever acquires the lock first — the block below shows one of the two possible orders — but the jobs never overlap:
 
 ```
 job 1: printing 10 pages
@@ -281,7 +283,6 @@ def serve(
 Every request is handled on its own fiber, and a forked fiber receives a copy of the context at the time of the fork. Setting the context at the start of a request therefore affects that request only:
 
 ```scala mdoc:silent
-import cats.effect.{IO, IOLocal}
 import cats.syntax.all._
 
 def app: IO[Unit] =
